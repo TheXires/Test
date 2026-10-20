@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-linux:
+    name: ShoppingListKit (Linux)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run package tests
+        run: swift test --package-path Packages/ShoppingListKit
+
+  ios:
+    name: iOS app (build & simulator tests)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Run package tests
+        run: swift test --package-path Packages/ShoppingListKit
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Pick iPhone simulator
+        id: simulator
+        run: |
+          udid=$(xcrun simctl list devices available --json | python3 -c '
+          import json, re, sys
+          devices = json.load(sys.stdin)["devices"]
+          def version(runtime):
+              m = re.search(r"iOS-([\d-]+)$", runtime)
+              return tuple(int(p) for p in m.group(1).split("-")) if m else None
+          runtimes = sorted((r for r in devices if version(r)), key=version, reverse=True)
+          for runtime in runtimes:
+              for d in devices[runtime]:
+                  if d["isAvailable"] and d["name"].startswith("iPhone"):
+                      name = d["name"]
+                      print(d["udid"])
+                      print(f"Using {name} ({runtime})", file=sys.stderr)
+                      sys.exit(0)
+          sys.exit("No iPhone simulator found")
+          ')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project ShoppingList.xcodeproj \
+            -scheme ShoppingList \
+            -destination "id=${{ steps.simulator.outputs.udid }}" \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults
+          path: TestResults.xcresult
